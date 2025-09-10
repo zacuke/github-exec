@@ -221,6 +221,6 @@ main() {
     exec "$LOCAL_FILE" "${ARGS[@]}"
 }
 
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-    main "$@"
-fi
+ 
+main "$@"
+ 
