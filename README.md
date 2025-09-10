@@ -1,6 +1,6 @@
-# github-exec
 
-Execute binaries directly from GitHub releases with zero dependencies (just curl).
+
+github-exec - Execute binaries from GitHub releases
 
 ## Installation
 ```bash
@@ -16,7 +16,7 @@ Options:
   --force              Force redownload
   --help               Show this help
   --cache-dir DIR      Custom cache directory (default: ~/.cache/github-exec)
-  --no-cache           Disable caching
+
 ```
 
 ## Portable One-liner (no install):
@@ -27,4 +27,4 @@ curl -sSL https://raw.githubusercontent.com/zacuke/github-exec/main/github-exec.
 ```bash
 curl -sSL https://effectivesln.com/github-exec.sh | bash -s -- <user/repo> <executable> [args...]
 ```
-
+ 
