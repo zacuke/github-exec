@@ -68,14 +68,14 @@ parse_args() {
                 ;;
         esac
     done
-if [ $# -lt 1 ]; then
-    usage
-fi
+    if [ $# -lt 1 ]; then
+        usage
+    fi
 
-REPO="$1"
-shift
-# The executable is actually the first argument to pass to the downloaded binary
-ARGS=("$@")
+    REPO="$1"
+    shift
+    # The executable is actually the first argument to pass to the downloaded binary
+    ARGS=("$@")
 }
 
 # Clean up temporary cache
@@ -85,21 +85,44 @@ cleanup() {
     fi
 }
 
-# Extract download URL from JSON for a specific asset name - SIMPLIFIED
+# Extract download URL from JSON for a specific asset name
 extract_download_url() {
     local json="$1"
     local asset_name="$2"
-    
-    # Use a simple pattern that matches the download URL format
     echo "$json" | grep -o "\"browser_download_url\": \"[^\"]*$asset_name[^\"]*\"" | \
     head -1 | \
     cut -d'"' -f4
 }
 
-# Clean asset names - remove empty lines and trim whitespace
+# Clean asset names
 clean_asset_list() {
     local assets="$1"
     echo "$assets" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+# Try to fetch a checksum file if available
+get_checksum_for_asset() {
+    local json="$1"
+    local asset_name="$2"
+
+    # Try to find a checksums.txt or .sha256 file
+    local checksum_asset=$(echo "$json" | grep -o '"name": "[^"]*"' | cut -d'"' -f4 \
+        | grep -i -E 'checksums?.txt|sha256' | head -1)
+
+    if [ -n "$checksum_asset" ]; then
+        local url=$(extract_download_url "$json" "$checksum_asset")
+        if [ -n "$url" ]; then
+            echo "Fetching checksum file: $checksum_asset" >&2
+            local tmp=$(mktemp)
+            curl -sSL -o "$tmp" "$url" || { rm -f "$tmp"; return 1; }
+            # Try to extract a matching checksum for the asset
+            local checksum=$(grep -i "$asset_name" "$tmp" | head -1 | awk '{print $1}')
+            rm -f "$tmp"
+            echo "$checksum"
+            return 0
+        fi
+    fi
+    return 1
 }
 
 # Main execution
@@ -107,7 +130,6 @@ main() {
     parse_args "$@"
     trap cleanup EXIT
 
-    # Create directories
     mkdir -p "$CACHE_DIR"
 
     # GitHub API URL
@@ -117,99 +139,88 @@ main() {
         API_URL="https://api.github.com/repos/${REPO}/releases/tags/${VERSION}"
     fi
 
-    # Get release info
     echo "Fetching release info for ${REPO}..." >&2
     RELEASE_JSON=$(curl -sSL -H "Accept: application/vnd.github.v3+json" "$API_URL")
 
-    # Check for errors
     if echo "$RELEASE_JSON" | grep -q '"message": "Not Found"'; then
         echo "Error: Repository or release not found: ${REPO}@${VERSION}" >&2
         exit 1
     fi
 
-    # Extract all asset names and clean them
+    # Extract the release tag
+    RELEASE_TAG=$(echo "$RELEASE_JSON" | grep -m1 '"tag_name":' | cut -d'"' -f4)
+
+    # Extract assets
     ASSETS=$(echo "$RELEASE_JSON" | grep -o '"name": "[^"]*"' | cut -d'"' -f4)
     ASSETS=$(clean_asset_list "$ASSETS")
-    
-    if [ -z "$ASSETS" ]; then
-        echo "Error: No assets found in release" >&2
-        exit 1
-    fi
+    [ -z "$ASSETS" ] && { echo "Error: No assets found in release" >&2; exit 1; }
 
     echo "Available assets:" >&2
     echo "$ASSETS" | sed 's/^/  - /' >&2
 
-    # Find the best matching asset - Ubuntu first, then fallbacks
+    # Find best asset
     ASSET_NAME=""
     UBUNTU_VERSION=$(detect_ubuntu_version)
-    
     if [ -n "$UBUNTU_VERSION" ]; then
-        echo "Detected Ubuntu version: $UBUNTU_VERSION" >&2
-        # Priority 1: Exact Ubuntu version match (e.g., ubuntu24.04)
         ASSET_NAME=$(echo "$ASSETS" | grep -i "$UBUNTU_VERSION" | head -1)
-        [ -n "$ASSET_NAME" ] && echo "Found exact Ubuntu match: $ASSET_NAME" >&2
     fi
-    
-    # Priority 2: Any Ubuntu match
-    if [ -z "$ASSET_NAME" ]; then
-        ASSET_NAME=$(echo "$ASSETS" | grep -i "ubuntu" | head -1)
-        [ -n "$ASSET_NAME" ] && echo "Found Ubuntu match: $ASSET_NAME" >&2
-    fi
-    
-    # Priority 3: Linux matches
-    if [ -z "$ASSET_NAME" ]; then
-        ASSET_NAME=$(echo "$ASSETS" | grep -i "linux" | head -1)
-        [ -n "$ASSET_NAME" ] && echo "Found Linux match: $ASSET_NAME" >&2
-    fi
-    
-    # Priority 4: First available asset
-    if [ -z "$ASSET_NAME" ]; then
-        ASSET_NAME=$(echo "$ASSETS" | head -1)
-        echo "Using first available asset: $ASSET_NAME" >&2
-    fi
+    [ -z "$ASSET_NAME" ] && ASSET_NAME=$(echo "$ASSETS" | grep -i "ubuntu" | head -1)
+    [ -z "$ASSET_NAME" ] && ASSET_NAME=$(echo "$ASSETS" | grep -i "linux" | head -1)
+    [ -z "$ASSET_NAME" ] && ASSET_NAME=$(echo "$ASSETS" | head -1)
 
     echo "Selected asset: $ASSET_NAME" >&2
 
-    # Get download URL - try multiple approaches
     DOWNLOAD_URL=$(extract_download_url "$RELEASE_JSON" "$ASSET_NAME")
-    
-    if [ -z "$DOWNLOAD_URL" ]; then
-        # Alternative approach: look for the URL pattern directly
-        DOWNLOAD_URL=$(echo "$RELEASE_JSON" | grep -o "https://github.com/[^/]*/[^/]*/releases/download/[^\"]*$ASSET_NAME" | head -1)
-    fi
-    
     if [ -z "$DOWNLOAD_URL" ]; then
         echo "ERROR: Could not extract download URL for asset: $ASSET_NAME" >&2
-        echo "Debug: Showing browser_download_url patterns found:" >&2
-        echo "$RELEASE_JSON" | grep '"browser_download_url"' | head -3 >&2
         exit 1
     fi
-
     echo "Download URL: $DOWNLOAD_URL" >&2
 
-    # Local file path
-    LOCAL_FILE="${CACHE_DIR}/${REPO//\//_}_${ASSET_NAME}"
+    # File locations
+    LOCAL_PREFIX="${CACHE_DIR}/${REPO//\//_}_${ASSET_NAME}"
+    LOCAL_FILE="${LOCAL_PREFIX}.bin"
+    VERSION_FILE="${LOCAL_PREFIX}.version"
 
-    # Download if needed
+    # Checksum retrieval
+    EXPECTED_SHA=""
+    EXPECTED_SHA=$(get_checksum_for_asset "$RELEASE_JSON" "$ASSET_NAME" || true)
+
+    NEED_DOWNLOAD=false
     if [ "$FORCE" = true ] || [ ! -f "$LOCAL_FILE" ]; then
-        echo "Downloading ${ASSET_NAME}..." >&2
-        curl -L -f -o "${LOCAL_FILE}.tmp" "$DOWNLOAD_URL" || {
-            echo "Download failed: $DOWNLOAD_URL" >&2
-            exit 1
-        }
+        NEED_DOWNLOAD=true
+    elif [ "$VERSION" = "latest" ]; then
+        if [ ! -f "$VERSION_FILE" ] || [ "$(cat "$VERSION_FILE")" != "$RELEASE_TAG" ]; then
+            echo "Cached version mismatch, refreshing..." >&2
+            NEED_DOWNLOAD=true
+        fi
+    fi
+
+    if [ "$NEED_DOWNLOAD" = true ]; then
+        echo "Downloading ${ASSET_NAME} ($RELEASE_TAG)..." >&2
+        curl -L -f -o "${LOCAL_FILE}.tmp" "$DOWNLOAD_URL"
+        if [ -n "$EXPECTED_SHA" ]; then
+            echo "Validating checksum..." >&2
+            ACTUAL_SHA=$(sha256sum "${LOCAL_FILE}.tmp" | awk '{print $1}')
+            if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+                echo "ERROR: Checksum mismatch! Expected $EXPECTED_SHA but got $ACTUAL_SHA" >&2
+                rm -f "${LOCAL_FILE}.tmp"
+                exit 1
+            fi
+        fi
         mv "${LOCAL_FILE}.tmp" "$LOCAL_FILE"
         chmod +x "$LOCAL_FILE"
+        echo "$RELEASE_TAG" > "$VERSION_FILE"
         echo "Download completed: $LOCAL_FILE" >&2
     else
         echo "Using cached version: $LOCAL_FILE" >&2
     fi
 
-    # Execute the binary with all remaining arguments
+    # Execute binary
     echo "Executing: $LOCAL_FILE ${ARGS[*]}" >&2
     exec "$LOCAL_FILE" "${ARGS[@]}"
 }
 
-# If script is being executed directly, run main
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     main "$@"
 fi
