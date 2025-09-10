@@ -2,7 +2,7 @@
 
 github-exec - Execute binaries from GitHub releases
 
-## Installation
+## Installation and Update
 ```bash
 curl -sSL https://raw.githubusercontent.com/zacuke/github-exec/main/install.sh | bash
 ```
@@ -28,3 +28,8 @@ curl -sSL https://raw.githubusercontent.com/zacuke/github-exec/main/github-exec.
 curl -sSL https://effectivesln.com/github-exec.sh | bash -s -- <user/repo> <executable> [args...]
 ```
  
+
+ ## Uninstallation 
+```bash
+curl -sSL https://raw.githubusercontent.com/zacuke/github-exec/main/uninstall.sh | bash
+```
